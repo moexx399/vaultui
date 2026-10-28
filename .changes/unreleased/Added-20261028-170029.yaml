@@ -1,3 +1,0 @@
-kind: Added
-body: 'Initial release: a Bubble Tea TUI that finds a user''s Vault identity entities by email or username and browses the paths their group policies declare, with a fuzzy-filtered path list, per-path rule previews with source policies and groups, and a full report that merges identical permission bodies and flags unreadable or unconsolidated policies. Contexts and logins come from vaultctx.'
-time: 2026-10-28T17:00:29.448292508-05:00
