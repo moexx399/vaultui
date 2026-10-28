@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -54,7 +55,11 @@ func (v *verdict) add(l level, reason string) {
 type cluster struct {
 	Contexts []string
 	Address  string
-	Err      string // sys/replication/status failed; nothing else is known
+	// DiscoveredVia names the cluster whose replication status listed this
+	// one, when no vaultctx context points at it.
+	DiscoveredVia  string
+	discoveredFrom *cluster // groups an unreachable discovered peer with its finder
+	Err            string   // sys/replication/status failed; nothing else is known
 
 	HealthCode  int // sys/health encodes the node state in its status code
 	HealthErr   string
@@ -66,7 +71,14 @@ type cluster struct {
 	TLS   *certInfo
 }
 
-func (c *cluster) Name() string { return strings.Join(c.Contexts, ", ") }
+// Name is the cluster's vaultctx contexts, or for a cluster found only
+// through replication, its host's short name.
+func (c *cluster) Name() string {
+	if len(c.Contexts) == 0 {
+		return shortName(c.Address)
+	}
+	return strings.Join(c.Contexts, ", ")
+}
 
 // replication is one cluster's view of one replication mode.
 type replication struct {
@@ -134,36 +146,88 @@ func collectStatus(ctx context.Context, opts statusOptions) ([]topology, error) 
 	}
 	wg.Wait()
 
-	// One target per distinct address.
-	type target struct {
-		contexts []string
-		env      map[string]string
-	}
 	var targets []*target
-	byAddr := map[string]*target{}
+	seen := map[string]bool{}
 	var clusters []*cluster
 	for i, name := range names {
 		if errs[i] != nil {
 			clusters = append(clusters, &cluster{Contexts: []string{name}, Err: errs[i].Error()})
 			continue
 		}
-		addr := strings.TrimRight(strings.ToLower(envs[i]["VAULT_ADDR"]), "/")
-		if t, ok := byAddr[addr]; ok {
-			t.contexts = append(t.contexts, name)
+		addr := normalizeAddr(envs[i]["VAULT_ADDR"])
+		if seen[addr] { // one target per distinct address
+			for _, t := range targets {
+				if normalizeAddr(t.env["VAULT_ADDR"]) == addr {
+					t.contexts = append(t.contexts, name)
+				}
+			}
 			continue
 		}
-		t := &target{contexts: []string{name}, env: envs[i]}
-		byAddr[addr] = t
-		targets = append(targets, t)
+		seen[addr] = true
+		targets = append(targets, &target{contexts: []string{name}, env: envs[i]})
 	}
-
-	fetched := make([]*cluster, len(targets))
-	for i, t := range targets {
-		wg.Go(func() { fetched[i] = fetchCluster(ctx, t.contexts, t.env, opts) })
-	}
-	wg.Wait()
-	return buildTopologies(append(clusters, fetched...)), nil
+	return buildTopologies(append(clusters, crawl(ctx, targets, opts)...)), nil
 }
+
+// target is an address to query, with the TLS settings to reach it.
+type target struct {
+	contexts []string // vaultctx contexts pointing at it; none if discovered
+	via      *cluster // for a discovered address, the cluster that listed it
+	env      map[string]string
+}
+
+// maxClusters bounds discovery in case peers keep listing new addresses.
+const maxClusters = 64
+
+// crawl queries targets and then, round by round, every DR and performance
+// replication peer address the reachable clusters report that has not been
+// queried yet, until no new addresses turn up. A discovered address is
+// reached with the TLS settings of the context it was found through.
+func crawl(ctx context.Context, targets []*target, opts statusOptions) []*cluster {
+	seen := map[string]bool{}
+	for _, t := range targets {
+		seen[normalizeAddr(t.env["VAULT_ADDR"])] = true
+	}
+	var all []*cluster
+	for round := targets; len(round) > 0; {
+		fetched := make([]*cluster, len(round))
+		var wg sync.WaitGroup
+		for i, t := range round {
+			wg.Go(func() {
+				fetched[i] = fetchCluster(ctx, t.contexts, t.env, opts)
+				if t.via != nil {
+					fetched[i].DiscoveredVia, fetched[i].discoveredFrom = t.via.Name(), t.via
+				}
+			})
+		}
+		wg.Wait()
+		all = append(all, fetched...)
+
+		var next []*target
+		for i, c := range fetched {
+			for _, mode := range []string{"dr", "performance"} {
+				r := c.Modes[mode]
+				if r == nil {
+					continue
+				}
+				for _, p := range r.Peers {
+					addr := normalizeAddr(p.APIAddress)
+					if addr == "" || seen[addr] || len(seen) >= maxClusters {
+						continue
+					}
+					seen[addr] = true
+					env := maps.Clone(round[i].env)
+					env["VAULT_ADDR"] = p.APIAddress
+					next = append(next, &target{via: c, env: env})
+				}
+			}
+		}
+		round = next
+	}
+	return all
+}
+
+func normalizeAddr(addr string) string { return strings.TrimRight(strings.ToLower(addr), "/") }
 
 func fetchCluster(ctx context.Context, contexts []string, env map[string]string, opts statusOptions) *cluster {
 	c := &cluster{Contexts: contexts, Address: env["VAULT_ADDR"]}
@@ -274,10 +338,13 @@ func parseReplication(mode string, b map[string]any, now time.Time) *replication
 func buildTopologies(all []*cluster) []topology {
 	var clusters []*cluster
 	byID := map[string]*cluster{}
+	rep := map[*cluster]*cluster{} // what each cluster was merged into
 	for _, c := range all {
+		rep[c] = c
 		if c.ClusterID != "" {
 			if seen, ok := byID[c.ClusterID]; ok {
 				seen.Contexts = append(seen.Contexts, c.Contexts...)
+				rep[c] = seen
 				continue
 			}
 			byID[c.ClusterID] = c
@@ -316,6 +383,12 @@ func buildTopologies(all []*cluster) []topology {
 					r.WALLag = &lag
 				}
 			}
+		}
+	}
+
+	for _, c := range clusters {
+		if from := c.discoveredFrom; from != nil {
+			parent[find(c)] = find(rep[from])
 		}
 	}
 
@@ -489,15 +562,16 @@ func healthState(code int) string {
 	return fmt.Sprintf("unknown (%d)", code)
 }
 
-// nodeHealth judges the node a context's address reaches: anything but the
-// active node means a failover or misrouted load balancer.
+// nodeHealth judges the node an address reaches: anything but an active
+// node (of a primary, or of a DR secondary, which reports 472) means a
+// failover or a misrouted load balancer.
 func nodeHealth(c *cluster) verdict {
 	var v verdict
 	switch {
 	case c.HealthErr != "":
 		v.add(levelCrit, c.HealthErr)
-	case c.HealthCode == 200:
-	case c.HealthCode == 429 || c.HealthCode == 472 || c.HealthCode == 473:
+	case c.HealthCode == 200 || c.HealthCode == 472:
+	case c.HealthCode == 429 || c.HealthCode == 473:
 		v.add(levelWarn, "routed to "+healthState(c.HealthCode)+" node")
 	default:
 		v.add(levelCrit, "state="+healthState(c.HealthCode))

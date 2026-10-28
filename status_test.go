@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,6 +9,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -77,13 +80,14 @@ func TestTopologyLinksAndHealth(t *testing.T) {
 	if v := syncHealth(sec); v.Level != levelOK {
 		t.Fatalf("secondary health %+v", v)
 	}
-	// The secondary is reached via a DR-secondary node, which is a warning.
-	if lvl, _ := prd.overall(); lvl != levelWarn {
+	// The secondary's active node reports 472, which is healthy for a DR
+	// secondary; only the unreported known secondary is unknown.
+	if lvl, _ := prd.overall(); lvl != levelOK {
 		t.Fatalf("overall %v", lvl)
 	}
 
 	page := renderTopology(prd, 120)
-	for _, s := range []string{"[PRIMARY]", "wal=5,000", "├─▶", "lag=+50", "link: connected", "└─▶", "sec-gone", "routed to dr-secondary node", "Overall: WARNING"} {
+	for _, s := range []string{"[PRIMARY]", "wal=5,000", "├─▶", "lag=+50", "link: connected", "└─▶", "sec-gone", "state=dr-secondary", "Overall: HEALTHY"} {
 		if !strings.Contains(page, s) {
 			t.Errorf("page missing %q:\n%s", s, page)
 		}
@@ -141,6 +145,97 @@ func TestShortName(t *testing.T) {
 	} {
 		if got := shortName(in); got != want {
 			t.Errorf("shortName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// fakeVault serves sys/health (with the given status code) and
+// sys/replication/status from the given replication data.
+func fakeVault(t *testing.T, useTLS bool, healthCode int, clusterID string, replication func() map[string]any) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/sys/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(healthCode)
+		json.NewEncoder(w).Encode(map[string]any{"version": "1.17.2", "cluster_id": clusterID, "cluster_name": "c-" + clusterID})
+	})
+	mux.HandleFunc("GET /v1/sys/replication/status", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"data": replication()})
+	})
+	srv := httptest.NewUnstartedServer(mux)
+	if useTLS {
+		srv.StartTLS()
+	} else {
+		srv.Start()
+	}
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestCrawlDiscoversReplicationPeers(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close() // a performance secondary that cannot be reached
+
+	hb := time.Now().Add(-2 * time.Second).UTC().Format(time.RFC3339)
+	var primary, drSecondary *httptest.Server
+	primary = fakeVault(t, false, 200, "p", func() map[string]any {
+		return map[string]any{
+			"dr": map[string]any{"mode": "primary", "state": "running", "cluster_id": "dr-set", "last_dr_wal": 1000,
+				"secondaries": []map[string]any{{"node_id": "dr-sec", "api_address": drSecondary.URL, "connection_status": "connected", "last_heartbeat": hb}}},
+			"performance": map[string]any{"mode": "primary", "state": "running", "cluster_id": "pr-set", "last_performance_wal": 500,
+				"secondaries": []map[string]any{{"node_id": "pr-sec", "api_address": gone.URL, "connection_status": "disconnected"}}},
+		}
+	})
+	// HTTPS with a self-signed certificate: reached with the context's TLS
+	// settings (skip_verify here), and its certificate is checked too.
+	drSecondary = fakeVault(t, true, 472, "s", func() map[string]any {
+		return map[string]any{
+			"dr": map[string]any{"mode": "secondary", "state": "stream-wals", "cluster_id": "dr-set", "secondary_id": "dr-sec",
+				"connection_state": "ready", "last_remote_wal": 990,
+				// Lists the primary back: already queried, so not fetched twice.
+				"primaries": []map[string]any{{"api_address": primary.URL, "connection_status": "connected", "last_heartbeat": hb}}},
+			"performance": map[string]any{"mode": "disabled"},
+		}
+	})
+
+	clusters := crawl(context.Background(), []*target{{contexts: []string{"prd"}, env: map[string]string{"VAULT_ADDR": primary.URL, "VAULT_SKIP_VERIFY": "true"}}},
+		statusOptions{Timeout: 2 * time.Second})
+	if len(clusters) != 3 {
+		t.Fatalf("crawled %d clusters, want 3 (context, DR secondary, unreachable performance secondary)", len(clusters))
+	}
+	byAddr := map[string]*cluster{}
+	for _, c := range clusters {
+		byAddr[c.Address] = c
+	}
+	if s := byAddr[drSecondary.URL]; s == nil || s.DiscoveredVia != "prd" || s.HealthCode != 472 || s.Modes["dr"] == nil {
+		t.Fatalf("DR secondary: %+v", s)
+	}
+	if c := byAddr[drSecondary.URL].TLS; c == nil || c.Err != "" || c.Fingerprint == "" {
+		t.Fatalf("DR secondary certificate: %+v", c)
+	}
+	if g := byAddr[gone.URL]; g == nil || g.Err == "" || g.DiscoveredVia != "prd" {
+		t.Fatalf("unreachable peer: %+v", g)
+	}
+
+	tops := buildTopologies(clusters)
+	if len(tops) != 1 || tops[0].Name != "prd" || len(tops[0].Clusters) != 3 {
+		t.Fatalf("topologies: %+v", tops)
+	}
+	sec := byAddr[drSecondary.URL].Modes["dr"]
+	if sec.Primary == nil || sec.Primary.Name() != "prd" || sec.WALLag == nil || *sec.WALLag != 10 {
+		t.Fatalf("DR secondary not linked: %+v", sec)
+	}
+	page := renderTopology(tops[0], 160)
+	for _, s := range []string{"discovered via prd", "lag=+10", "connection refused", "TLS Certificates", "sha256:"} {
+		if !strings.Contains(page, s) {
+			t.Errorf("page missing %q:\n%s", s, page)
+		}
+	}
+}
+
+func TestNodeHealth(t *testing.T) {
+	for code, want := range map[int]level{200: levelOK, 472: levelOK, 429: levelWarn, 473: levelWarn, 503: levelCrit, 501: levelCrit} {
+		if got := nodeHealth(&cluster{HealthCode: code}).Level; got != want {
+			t.Errorf("health %d: %v, want %v", code, got, want)
 		}
 	}
 }

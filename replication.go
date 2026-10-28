@@ -264,6 +264,14 @@ func fmtLag(r *replication) string {
 	return okSt.Render(s)
 }
 
+// via notes how a cluster no context points at was found.
+func via(c *cluster) string {
+	if c.DiscoveredVia == "" {
+		return ""
+	}
+	return dimSt.Render(" (discovered via " + c.DiscoveredVia + ")")
+}
+
 // field renders "label: value" indented under a node, wrapping the value
 // with a hanging indent.
 func field(label, value string, width int) string {
@@ -298,15 +306,15 @@ func renderTopology(t topology, width int) string {
 
 	reachable := slices.ContainsFunc(t.Clusters, func(c *cluster) bool { return c.Err == "" })
 	if reachable {
-		add(section("Contexts", width))
+		add(section("Clusters", width))
 	}
 	for _, c := range t.Clusters {
 		if c.Err != "" {
 			continue
 		}
 		v := nodeHealth(c)
-		add(fmt.Sprintf("  %s %s %s state=%s %s cluster=%s", mark(v.Level), nodeSt.Render(c.Name()), dimSt.Render(c.Address),
-			healthState(c.HealthCode), fmtVersion(c), orNA(c.ClusterName)))
+		add(fmt.Sprintf("  %s %s %s state=%s %s cluster=%s%s", mark(v.Level), nodeSt.Render(c.Name()), dimSt.Render(c.Address),
+			healthState(c.HealthCode), fmtVersion(c), orNA(c.ClusterName), via(c)))
 		add(reasons("         ", v)...)
 	}
 	if reachable {
@@ -385,7 +393,7 @@ func renderTopology(t topology, width int) string {
 	var unreachable []string
 	for _, c := range t.Clusters {
 		if c.Err != "" {
-			unreachable = append(unreachable, fmt.Sprintf("  %s %s: %s", warnSt.Render("CRIT"), c.Name(), c.Err))
+			unreachable = append(unreachable, fmt.Sprintf("  %s %s: %s%s", warnSt.Render("CRIT"), c.Name(), c.Err, via(c)))
 		}
 	}
 	if len(unreachable) > 0 {

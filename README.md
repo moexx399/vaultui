@@ -55,19 +55,25 @@ policies are parsed; any policy with other syntax is shown in full as
 
 ## replication-status
 
-Checks every vaultctx context's address (contexts reaching the same cluster
-are merged) without logging in, using `sys/health`, `sys/replication/status`
-and the TLS handshake:
+Checks every vaultctx context's address without logging in, using
+`sys/health`, `sys/replication/status` and the TLS handshake. It then follows
+replication: every DR and performance peer a reachable cluster reports
+(a primary's secondaries, a secondary's primary) is checked the same way, and
+so on until no new addresses turn up, so the clusters behind your contexts
+are covered even without a context of their own. A discovered cluster is
+reached with the TLS settings of the context it was found through and shown
+as "discovered via" that context; contexts reaching the same cluster are
+merged.
 
-- **Contexts**: the node each address reaches. Anything but the active node
-  (standby, DR secondary, performance standby) is a warning; sealed or
-  uninitialized is critical.
+- **Clusters**: the node each address reaches. A standby or performance
+  standby node is a warning (the active node of a DR secondary is fine);
+  sealed or uninitialized is critical.
 - **DR and performance replication**: each primary with its secondaries as a
   tree, with state, connection, WAL position and lag (warn at 100 entries,
   critical at 1000), and the primary's link record (heartbeat, clock skew,
   canary age). Secondaries are linked to primaries by replication cluster ID,
-  so contexts may point at load-balancer aliases. Secondaries the primary
-  reports but no context reaches are listed as not queried.
+  so contexts may point at load-balancer aliases. Peers that cannot be
+  reached are listed under Unreachable.
 - **Unreachable** contexts and **TLS certificates** (expiry warns at 30 days,
   critical at 7; a certificate that differs from the rest of the topology is
   critical).
