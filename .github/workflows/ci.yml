@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test -race ./...
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2.19"
+          args: check
+
+  changelog:
+    # Every PR must add a changie fragment (`changie new`), unless labelled
+    # skip-changelog (e.g. CI-only or docs typo changes). Dependabot PRs get
+    # theirs from dependabot-changie.yml.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-changelog')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Require a changie fragment
+        run: |
+          if ! git diff --name-only --diff-filter=A "origin/${{ github.base_ref }}...HEAD" -- .changes/unreleased | grep -q '\.yaml$'; then
+            echo "::error::Add a changelog entry with 'changie new' (or label the PR skip-changelog)."
+            exit 1
+          fi

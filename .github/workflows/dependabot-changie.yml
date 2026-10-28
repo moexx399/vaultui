@@ -1,0 +1,50 @@
+name: dependabot-changie
+
+# Adds a changie fragment to Dependabot PRs, which cannot run `changie new`
+# themselves. ci.yml's changelog check skips Dependabot PRs because this
+# workflow provides the fragment.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  fragment:
+    # Only Dependabot's own pushes; the fragment commit below is not one, so
+    # it cannot retrigger this job.
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          # Pushes made with GITHUB_TOKEN do not start new workflow runs. Add a
+          # CHANGIE_PUSH_TOKEN Dependabot secret (contents:write on this repo)
+          # if CI must run again on the fragment commit, e.g. for required checks.
+          token: ${{ secrets.CHANGIE_PUSH_TOKEN || github.token }}
+      - name: Check for an existing fragment
+        id: existing
+        run: |
+          if git diff --name-only --diff-filter=A "origin/${{ github.base_ref }}...HEAD" -- .changes/unreleased | grep -q '\.yaml$'; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@v6
+        if: steps.existing.outputs.found != 'true'
+        with:
+          go-version-file: go.mod
+      - name: Add changie fragment
+        if: steps.existing.outputs.found != 'true'
+        env:
+          # Passed through env, never interpolated into the script.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          go install github.com/miniscruff/changie@v1.26.0
+          "$(go env GOPATH)/bin/changie" new --kind Dependencies --body "$PR_TITLE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .changes/unreleased
+          git commit -m "Add changie fragment"
+          git push origin "HEAD:${{ github.head_ref }}"
