@@ -47,21 +47,19 @@ func loginCmd(name string) *exec.Cmd {
 // errNeedsLogin means the context has no valid cached token.
 var errNeedsLogin = errors.New("needs login")
 
-// connect builds a Vault client from the context's environment as reported by
+// contextEnv returns the context's environment as reported by
 // `vaultctx env`, without switching the user's active context.
-func connect(ctx context.Context, name string) (*api.Client, error) {
+func contextEnv(ctx context.Context, name string) (map[string]string, error) {
 	out, err := output(vaultctxCmd(ctx, "env", "--shell", "bash", name))
 	if err != nil {
 		return nil, err
 	}
-	env, err := parseEnv(out)
-	if err != nil {
-		return nil, err
-	}
-	if env["VAULT_TOKEN"] == "" {
-		return nil, errNeedsLogin
-	}
+	return parseEnv(out)
+}
 
+// vaultConfig is a Vault client config for the address and TLS settings in
+// a context's environment.
+func vaultConfig(env map[string]string) (*api.Config, error) {
 	cfg := api.DefaultConfig()
 	if cfg.Error != nil {
 		return nil, cfg.Error
@@ -73,6 +71,22 @@ func connect(ctx context.Context, name string) (*api.Client, error) {
 		ClientKey:  env["VAULT_CLIENT_KEY"],
 		Insecure:   env["VAULT_SKIP_VERIFY"] == "true",
 	}); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// connect builds an authenticated Vault client for a context.
+func connect(ctx context.Context, name string) (*api.Client, error) {
+	env, err := contextEnv(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if env["VAULT_TOKEN"] == "" {
+		return nil, errNeedsLogin
+	}
+	cfg, err := vaultConfig(env)
+	if err != nil {
 		return nil, err
 	}
 	client, err := api.NewClient(cfg)

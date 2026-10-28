@@ -1,4 +1,4 @@
-module github.com/moexx399/vault-user-policies
+module github.com/moexx399/vaultui
 
 go 1.26.0
 

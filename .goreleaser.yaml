@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 
-project_name: vault-user-policies
+project_name: vaultui
 
 before:
   hooks:
@@ -28,7 +28,7 @@ archives:
 release:
   github:
     owner: moexx399
-    name: vault-user-policies
+    name: vaultui
 
 checksum:
   name_template: checksums.txt
@@ -38,10 +38,10 @@ checksum:
 # loading the --release-notes file, leaving the release body empty.
 
 homebrew_casks:
-  - name: vault-user-policies
-    binaries: [vault-user-policies]
-    homepage: https://github.com/moexx399/vault-user-policies
-    description: Look up a user's Vault identities, groups and policies in a TUI
+  - name: vaultui
+    binaries: [vaultui]
+    homepage: https://github.com/moexx399/vaultui
+    description: Terminal UI for HashiCorp Vault, with vaultctx contexts
     dependencies:
       # Contexts and logins come from vaultctx.
       - cask: moexx399/tap/vaultctx
@@ -55,5 +55,5 @@ homebrew_casks:
         # postflight_steps; the older `install` renders deprecated postflight.
         install_steps: |
           on_macos do
-            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/vault-user-policies"]
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/vaultui"]
           end

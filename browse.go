@@ -174,7 +174,7 @@ func (b browser) header() string {
 		colorize(b.report.Overview(b.width)),
 		"",
 		dimSt.Render(fmt.Sprintf("%d paths • type to filter • ↑/↓ select • ctrl+d/u scroll preview • ctrl+r full report", len(b.entries))),
-		dimSt.Render("ctrl+n new search • ctrl+t change context • esc quit • Preview: group policy declarations, NOT effective access."),
+		dimSt.Render("esc new search • ctrl+c quit • Preview: group policy declarations, NOT effective access."),
 	}
 	if w := b.warning(); w != "" {
 		lines = append(lines, warnSt.Render(w))
@@ -183,9 +183,9 @@ func (b browser) header() string {
 }
 
 func (b browser) fullHeader() string {
-	help := "↑/↓ scroll • n new search • c change context • q quit"
+	help := "↑/↓ scroll • esc new search • q quit"
 	if len(b.entries) > 0 {
-		help = "↑/↓ scroll • esc/ctrl+r back to paths • ctrl+n new search • ctrl+t context"
+		help = "↑/↓ scroll • esc/ctrl+r back to paths • ctrl+c quit"
 	} else if len(b.report.Entities) > 0 {
 		help = "No browsable paths; showing the full report. " + help
 	}

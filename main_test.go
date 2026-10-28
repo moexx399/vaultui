@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"maps"
 	"net"
 	"os/exec"
@@ -86,6 +87,29 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// replication-status needs no login: it reaches every context, and
+	// reports ones it cannot reach.
+	if out, err := exec.Command(vaultctxBin, "add", "down", "--address", "http://127.0.0.1:1", "--method", "token").CombinedOutput(); err != nil {
+		t.Fatalf("vaultctx add: %v: %s", err, out)
+	}
+	tops, err := collectStatus(ctx, statusOptions{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tops) != 2 || tops[0].Name != "dev" || tops[1].Name != "down" {
+		t.Fatalf("topologies: %+v", tops)
+	}
+	dev := tops[0].Clusters[0]
+	if dev.Err != "" || dev.HealthCode != 200 || dev.Version == "" || len(dev.Modes) != 0 {
+		t.Fatalf("dev cluster: %+v", dev)
+	}
+	if page := renderTopology(tops[0], 100); !strings.Contains(page, "not configured on any queried cluster") || !strings.Contains(page, "Overall: HEALTHY") {
+		t.Fatalf("dev page:\n%s", page)
+	}
+	if tops[1].Clusters[0].Err == "" {
+		t.Fatal("down context should be unreachable")
+	}
+
 	if _, err := connect(ctx, "dev"); err != errNeedsLogin {
 		t.Fatalf("connect before login: got %v, want errNeedsLogin", err)
 	}
@@ -159,5 +183,18 @@ path "secret/data/dev/*" {
 		if !strings.Contains(text, s) {
 			t.Errorf("report missing %q:\n%s", s, text)
 		}
+	}
+}
+
+func TestRunArgs(t *testing.T) {
+	var out strings.Builder
+	if err := run([]string{"-h"}, &out); err != flag.ErrHelp || !strings.Contains(out.String(), "user-policies") {
+		t.Fatalf("help: %v\n%s", err, out.String())
+	}
+	if err := run([]string{"nope"}, &out); err == nil || !strings.Contains(err.Error(), `unknown function "nope"`) {
+		t.Fatalf("unknown function: %v", err)
+	}
+	if err := run([]string{"user-policies", "--email", "a@b", "extra"}, &out); err == nil {
+		t.Fatal("expected error for extra arguments")
 	}
 }
