@@ -20,9 +20,9 @@ path and the policies and groups they come from.
 
 ```text
  Vault: prd-cloud (https://vault.example.com)
- Email: (not supplied) | Username: wilsseb
+ Email: (not supplied) | Username: moexx399
  Entity: jane (ebfbb456-534b-f307-8aab-872380c9bc94)
- Aliases: WILSSEB [auth/userpass/]
+ Aliases: moexx399 [auth/userpass/]
  Groups (2): devs (direct), eng (inherited)
 
  Path > trans                                                          1/4
